@@ -15,7 +15,12 @@ use commands::remove::Remover;
 use crate::core::ParserError;
 
 #[derive(Parser, Debug)]
-#[command(name = env!("CARGO_PKG_NAME"), about = "Parses HDR10+ dynamic metadata in HEVC video files", author = "quietvoid", version = env!("CARGO_PKG_VERSION"))]
+#[command(
+    name = env!("CARGO_PKG_NAME"),
+    about = "Parses HDR10+ dynamic metadata in HEVC video files and injects HDR10+ into AV1 IVF",
+    author = "quietvoid",
+    version = env!("CARGO_PKG_VERSION")
+)]
 struct Opt {
     #[arg(long, help = "Checks if input file contains dynamic metadata")]
     verify: bool,
