@@ -3,6 +3,9 @@ pub mod metadata;
 #[cfg(feature = "json")]
 pub mod metadata_json;
 
+#[cfg(feature = "json")]
+pub mod av1;
+
 #[cfg(feature = "hevc")]
 pub mod hevc;
 

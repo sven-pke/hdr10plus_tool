@@ -1,8 +1,8 @@
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write, stdout};
+use std::io::{BufReader, BufWriter, Read, Write, stdout};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use hevc_parser::utils::{
     add_start_code_emulation_prevention_3_byte, clear_start_code_emulation_prevention_3_byte,
 };
@@ -12,6 +12,7 @@ use hevc_parser::io::{FrameBuffer, IoFormat, IoProcessor, NalBuffer, processor};
 use hevc_parser::{HevcParser, NALUStartCode, hevc::*};
 use processor::{HevcProcessor, HevcProcessorOpts};
 
+use hdr10plus::av1::encode_av1_from_json;
 use hdr10plus::metadata_json::{Hdr10PlusJsonMetadata, MetadataJsonRoot};
 
 use crate::commands::InjectArgs;
@@ -36,6 +37,20 @@ pub struct Injector {
 
     frame_buffer: FrameBuffer,
     last_metadata_written: Option<NalBuffer>,
+}
+
+struct IvfHeader {
+    raw: [u8; 32],
+    frame_count: u32,
+}
+
+struct Av1Injector {
+    input: PathBuf,
+    options: CliOptions,
+    metadata_list: Vec<Hdr10PlusJsonMetadata>,
+    progress_bar: ProgressBar,
+    writer: BufWriter<File>,
+    mismatched_length: bool,
 }
 
 impl Injector {
@@ -96,15 +111,21 @@ impl Injector {
 
     pub fn inject_json(args: InjectArgs, cli_options: CliOptions) -> Result<()> {
         let input = input_from_either("inject", args.input.clone(), args.input_pos.clone())?;
-        let format = hevc_parser::io::format_from_path(&input)?;
 
-        if let IoFormat::Raw = format {
-            let mut injector = Injector::from_args(args, cli_options)?;
+        if let Ok(format) = hevc_parser::io::format_from_path(&input) {
+            if let IoFormat::Raw = format {
+                let mut injector = Injector::from_args(args, cli_options)?;
 
-            injector.process_input()?;
-            injector.interleave_hdr10plus_nals()
+                injector.process_input()?;
+                return injector.interleave_hdr10plus_nals();
+            }
+        }
+
+        if input.extension().map(|ext| ext.eq_ignore_ascii_case("ivf")) == Some(true) {
+            let mut injector = Av1Injector::from_args(args, cli_options)?;
+            injector.inject_ivf()
         } else {
-            bail!("Injector: Must be a raw HEVC bitstream file")
+            bail!("Injector: Input must be a raw HEVC bitstream or AV1 IVF file")
         }
     }
 
@@ -218,6 +239,164 @@ impl Injector {
                 frame_buffer.frame_number
             );
         }
+    }
+}
+
+impl Av1Injector {
+    fn from_args(args: InjectArgs, cli_options: CliOptions) -> Result<Self> {
+        let InjectArgs {
+            input,
+            input_pos,
+            json,
+            output,
+        } = args;
+
+        let input = input_from_either("inject", input, input_pos)?;
+
+        let output = match output {
+            Some(path) => path,
+            None => PathBuf::from("injected_output.ivf"),
+        };
+
+        let chunk_size = 100_000;
+        let progress_bar = initialize_progress_bar(&IoFormat::Raw, &input)?;
+        let writer = BufWriter::with_capacity(chunk_size, File::create(output)?);
+
+        println!("Parsing JSON file...");
+        stdout().flush().ok();
+
+        let metadata_root = MetadataJsonRoot::from_file(&json)?;
+        let metadata_list = metadata_root.scene_info;
+
+        if metadata_list.is_empty() {
+            bail!("Empty HDR10+ SceneInfo array");
+        }
+
+        Ok(Self {
+            input,
+            options: cli_options,
+            metadata_list,
+            progress_bar,
+            writer,
+            mismatched_length: false,
+        })
+    }
+
+    fn read_ivf_header(reader: &mut BufReader<File>) -> Result<IvfHeader> {
+        let mut header = [0u8; 32];
+        reader.read_exact(&mut header)?;
+
+        if &header[0..4] != b"DKIF" {
+            bail!("Invalid IVF header magic");
+        }
+
+        if &header[8..12] != b"AV01" {
+            bail!("IVF is not AV1 fourcc");
+        }
+
+        let frame_count = u32::from_le_bytes(header[24..28].try_into().unwrap());
+
+        Ok(IvfHeader {
+            raw: header,
+            frame_count,
+        })
+    }
+
+    fn metadata_for_frame(
+        &self,
+        frame_index: usize,
+        last_obu: &Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(meta) = self.metadata_list.get(frame_index) {
+            let obu = encode_av1_from_json(meta, self.options.validate)?;
+            Ok(Some(obu))
+        } else if self.mismatched_length {
+            Ok(last_obu.clone())
+        } else {
+            bail!("No metadata found for frame {}", frame_index)
+        }
+    }
+
+    fn inject_ivf(&mut self) -> Result<()> {
+        println!("Processing AV1 IVF input...");
+        stdout().flush().ok();
+
+        let chunk_size = 100_000;
+
+        let mut reader = BufReader::with_capacity(chunk_size, File::open(&self.input)?);
+        let header = Self::read_ivf_header(&mut reader)?;
+        self.writer.write_all(&header.raw)?;
+
+        self.mismatched_length = if header.frame_count as usize != self.metadata_list.len() {
+            println!(
+                "\nWarning: mismatched lengths. video {}, HDR10+ JSON {}",
+                header.frame_count,
+                self.metadata_list.len()
+            );
+
+            if self.metadata_list.len() < header.frame_count as usize {
+                println!("Metadata will be duplicated at the end to match video length\n");
+            } else {
+                println!("Metadata will be skipped at the end to match video length\n");
+            }
+
+            true
+        } else {
+            false
+        };
+
+        let mut last_obu: Option<Vec<u8>> = None;
+        let mut frame_index: usize = 0;
+        let mut processed_bytes: u64 = 32;
+
+        loop {
+            let mut frame_header = [0u8; 12];
+            if reader.read_exact(&mut frame_header).is_err() {
+                break;
+            }
+
+            let frame_size = u32::from_le_bytes(frame_header[0..4].try_into().unwrap()) as usize;
+
+            let mut frame_buf = vec![0u8; frame_size];
+            reader.read_exact(&mut frame_buf)?;
+
+            let metadata = self.metadata_for_frame(frame_index, &last_obu)?;
+            if let Some(ref obu) = metadata {
+                last_obu = Some(obu.clone());
+            }
+
+            let mut out_frame =
+                Vec::with_capacity(frame_size + metadata.as_ref().map_or(0, |m| m.len()));
+            if let Some(obu) = metadata {
+                out_frame.extend_from_slice(&obu);
+            }
+            out_frame.extend_from_slice(&frame_buf);
+
+            ensure!(
+                out_frame.len() <= u32::MAX as usize,
+                "Frame too large after injection"
+            );
+
+            self.writer
+                .write_all(&(out_frame.len() as u32).to_le_bytes())?;
+            self.writer.write_all(&frame_header[4..12])?;
+            self.writer.write_all(&out_frame)?;
+
+            frame_index += 1;
+
+            processed_bytes += 12 + frame_size as u64;
+            self.progress_bar
+                .set_position(processed_bytes / 100_000_000);
+
+            if frame_index >= header.frame_count as usize {
+                break;
+            }
+        }
+
+        self.writer.flush()?;
+        self.progress_bar.finish_and_clear();
+
+        Ok(())
     }
 }
 
