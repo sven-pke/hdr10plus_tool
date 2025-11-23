@@ -367,7 +367,18 @@ impl Av1Injector {
         let mut frame_index: usize = 0;
         let mut processed_bytes: u64 = 32;
         let mut actual_frames: u32 = 0;
+        let timestamp_step: u64 = if header.timebase_num == 0 {
+            if header.timebase_den != 0 {
+                println!(
+                    "Warning: IVF timebase numerator is 0; defaulting to 1 tick per frame (denominator = {})",
+                    header.timebase_den
+                );
+            }
 
+            1
+        } else {
+            header.timebase_num as u64
+        };
         loop {
             let mut frame_header = [0u8; 12];
             if reader.read_exact(&mut frame_header).is_err() {
@@ -398,7 +409,8 @@ impl Av1Injector {
 
             self.writer
                 .write_all(&(out_frame.len() as u32).to_le_bytes())?;
-            self.writer.write_all(&current_timestamp.to_le_bytes())?;
+            let frame_timestamp = timestamp_step.saturating_mul(frame_index as u64);
+            self.writer.write_all(&frame_timestamp.to_le_bytes())?;
             self.writer.write_all(&out_frame)?;
 
             frame_index += 1;
@@ -408,9 +420,6 @@ impl Av1Injector {
             self.progress_bar
                 .set_position(processed_bytes / 100_000_000);
 
-            if header.frame_count != 0 && frame_index >= header.frame_count as usize {
-                break;
-            }
         }
 
         self.writer.flush()?;
