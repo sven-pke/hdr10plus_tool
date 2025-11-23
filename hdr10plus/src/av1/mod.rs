@@ -32,7 +32,7 @@ fn write_uleb128(value: usize) -> Vec<u8> {
 fn encode_av1_metadata_payload(metadata: &Hdr10PlusMetadata, validate: bool) -> Result<Vec<u8>> {
     let opts = Hdr10PlusMetadataEncOpts {
         validate,
-        with_country_code: false,
+        with_country_code: true,
     };
 
     let mut writer = BitstreamIoWriter::with_capacity(64);
