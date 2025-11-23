@@ -42,6 +42,8 @@ pub struct Injector {
 struct IvfHeader {
     raw: [u8; 32],
     frame_count: u32,
+    timebase_den: u32,
+    timebase_num: u32,
 }
 
 struct Av1Injector {
@@ -295,10 +297,14 @@ impl Av1Injector {
         }
 
         let frame_count = u32::from_le_bytes(header[24..28].try_into().unwrap());
+        let timebase_den = u32::from_le_bytes(header[16..20].try_into().unwrap());
+        let timebase_num = u32::from_le_bytes(header[20..24].try_into().unwrap());
 
         Ok(IvfHeader {
             raw: header,
             frame_count,
+            timebase_den,
+            timebase_num,
         })
     }
 
@@ -392,7 +398,7 @@ impl Av1Injector {
 
             self.writer
                 .write_all(&(out_frame.len() as u32).to_le_bytes())?;
-            self.writer.write_all(&frame_header[4..12])?;
+            self.writer.write_all(&current_timestamp.to_le_bytes())?;
             self.writer.write_all(&out_frame)?;
 
             frame_index += 1;
