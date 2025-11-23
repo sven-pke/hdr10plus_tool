@@ -1,5 +1,5 @@
 # hdr10plus_tool [![CI](https://github.com/quietvoid/hdr10plus_tool/workflows/CI/badge.svg)](https://github.com/quietvoid/hdr10plus_tool/actions/workflows/ci.yml) [![Artifacts](https://github.com/quietvoid/hdr10plus_tool/workflows/Artifacts/badge.svg)](https://github.com/quietvoid/hdr10plus_tool/actions/workflows/release.yml)
-CLI utility to work with HDR10+ in HEVC files.  
+CLI utility to work with HDR10+ in HEVC and AV1 (IVF) files.
 Previously named `hdr10plus_parser`, now it's more than just a parser.
 
 &nbsp;
@@ -54,12 +54,16 @@ Options that apply to the commands:
 
 &nbsp;
 * ### **inject**
-    Interleaves HDR10+ metadata NAL units before slices in an HEVC encoded bitstream.  
+    Interleaves HDR10+ metadata NAL units before slices in an HEVC encoded bitstream, or inserts metadata OBUs ahead of each frame in an AV1 IVF stream.
     `--verify` has no effect with this command.
-    
-    **Example**:  
+
+    **Example**:
     ```console
     hdr10plus_tool inject -i video.hevc -j metadata.json -o injected_output.hevc
+    ```
+    ```console
+    # AV1 IVF input
+    hdr10plus_tool inject -i video.ivf -j metadata.json -o injected_output.ivf
     ```
 
 &nbsp;

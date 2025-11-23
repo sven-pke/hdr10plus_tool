@@ -30,9 +30,7 @@ pub enum Command {
     #[command(about = "Extracts the HDR10+ metadata from HEVC SEI messages to a JSON file")]
     Extract(ExtractArgs),
 
-    #[command(
-        about = "Interleaves HDR10+ metadata NAL units before slices in an HEVC encoded bitstream"
-    )]
+    #[command(about = "Interleaves HDR10+ metadata into HEVC bitstreams or AV1 IVF files")]
     Inject(InjectArgs),
 
     #[command(about = "Removes HDR10+ metadata SEI messages in an HEVC encoded bitstream")]
