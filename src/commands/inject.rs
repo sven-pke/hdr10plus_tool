@@ -402,6 +402,9 @@ impl Av1Injector {
             self.progress_bar
                 .set_position(processed_bytes / 100_000_000);
 
+            if header.frame_count != 0 && frame_index >= header.frame_count as usize {
+                break;
+            }
         }
 
         self.writer.flush()?;
