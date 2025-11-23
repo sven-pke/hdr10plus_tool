@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write, stdout};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write, stdout};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail, ensure};
@@ -42,6 +42,8 @@ pub struct Injector {
 struct IvfHeader {
     raw: [u8; 32],
     frame_count: u32,
+    timebase_den: u32,
+    timebase_num: u32,
 }
 
 struct Av1Injector {
@@ -295,15 +297,19 @@ impl Av1Injector {
         }
 
         let frame_count = u32::from_le_bytes(header[24..28].try_into().unwrap());
+        let timebase_den = u32::from_le_bytes(header[16..20].try_into().unwrap());
+        let timebase_num = u32::from_le_bytes(header[20..24].try_into().unwrap());
 
         Ok(IvfHeader {
             raw: header,
             frame_count,
+            timebase_den,
+            timebase_num,
         })
     }
 
     fn metadata_for_frame(
-        &self,
+        &mut self,
         frame_index: usize,
         last_obu: &Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>> {
@@ -313,7 +319,18 @@ impl Av1Injector {
         } else if self.mismatched_length {
             Ok(last_obu.clone())
         } else {
-            bail!("No metadata found for frame {}", frame_index)
+            self.mismatched_length = true;
+
+            if let Some(previous) = last_obu {
+                println!(
+                    "\nWarning: mismatched lengths. video has more frames than metadata (first missing: {}).\nMetadata will be duplicated at the end to match video length\n",
+                    frame_index
+                );
+
+                Ok(Some(previous.clone()))
+            } else {
+                bail!("No metadata found for frame {}", frame_index)
+            }
         }
     }
 
@@ -327,28 +344,41 @@ impl Av1Injector {
         let header = Self::read_ivf_header(&mut reader)?;
         self.writer.write_all(&header.raw)?;
 
-        self.mismatched_length = if header.frame_count as usize != self.metadata_list.len() {
-            println!(
-                "\nWarning: mismatched lengths. video {}, HDR10+ JSON {}",
-                header.frame_count,
-                self.metadata_list.len()
-            );
+        self.mismatched_length =
+            if header.frame_count as usize != self.metadata_list.len() && header.frame_count != 0 {
+                println!(
+                    "\nWarning: mismatched lengths. video {}, HDR10+ JSON {}",
+                    header.frame_count,
+                    self.metadata_list.len()
+                );
 
-            if self.metadata_list.len() < header.frame_count as usize {
-                println!("Metadata will be duplicated at the end to match video length\n");
+                if self.metadata_list.len() < header.frame_count as usize {
+                    println!("Metadata will be duplicated at the end to match video length\n");
+                } else {
+                    println!("Metadata will be skipped at the end to match video length\n");
+                }
+
+                true
             } else {
-                println!("Metadata will be skipped at the end to match video length\n");
-            }
-
-            true
-        } else {
-            false
-        };
+                false
+            };
 
         let mut last_obu: Option<Vec<u8>> = None;
         let mut frame_index: usize = 0;
         let mut processed_bytes: u64 = 32;
+        let mut actual_frames: u32 = 0;
+        let timestamp_step: u64 = if header.timebase_num == 0 {
+            if header.timebase_den != 0 {
+                println!(
+                    "Warning: IVF timebase numerator is 0; defaulting to 1 tick per frame (denominator = {})",
+                    header.timebase_den
+                );
+            }
 
+            1
+        } else {
+            header.timebase_num as u64
+        };
         loop {
             let mut frame_header = [0u8; 12];
             if reader.read_exact(&mut frame_header).is_err() {
@@ -379,21 +409,34 @@ impl Av1Injector {
 
             self.writer
                 .write_all(&(out_frame.len() as u32).to_le_bytes())?;
-            self.writer.write_all(&frame_header[4..12])?;
+            let frame_timestamp = timestamp_step.saturating_mul(frame_index as u64);
+            self.writer.write_all(&frame_timestamp.to_le_bytes())?;
             self.writer.write_all(&out_frame)?;
 
             frame_index += 1;
+            actual_frames += 1;
 
             processed_bytes += 12 + frame_size as u64;
             self.progress_bar
                 .set_position(processed_bytes / 100_000_000);
 
-            if frame_index >= header.frame_count as usize {
-                break;
-            }
         }
 
         self.writer.flush()?;
+        if header.frame_count == 0 || header.frame_count != actual_frames {
+            self.writer.get_mut().seek(SeekFrom::Start(24))?;
+            self.writer
+                .get_mut()
+                .write_all(&actual_frames.to_le_bytes())?;
+            self.writer.flush()?;
+
+            if header.frame_count != 0 && header.frame_count != actual_frames {
+                println!(
+                    "\nWarning: IVF header frame count {} replaced with {} to match actual frames\n",
+                    header.frame_count, actual_frames
+                );
+            }
+        }
         self.progress_bar.finish_and_clear();
 
         Ok(())
