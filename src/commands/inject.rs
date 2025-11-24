@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write, stdout};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write, stdout};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail, ensure};
@@ -42,6 +42,8 @@ pub struct Injector {
 struct IvfHeader {
     raw: [u8; 32],
     frame_count: u32,
+    timebase_den: u32,
+    timebase_num: u32,
 }
 
 struct Av1Injector {
@@ -295,15 +297,19 @@ impl Av1Injector {
         }
 
         let frame_count = u32::from_le_bytes(header[24..28].try_into().unwrap());
+        let timebase_den = u32::from_le_bytes(header[16..20].try_into().unwrap());
+        let timebase_num = u32::from_le_bytes(header[20..24].try_into().unwrap());
 
         Ok(IvfHeader {
             raw: header,
             frame_count,
+            timebase_den,
+            timebase_num,
         })
     }
 
     fn metadata_for_frame(
-        &self,
+        &mut self,
         frame_index: usize,
         last_obu: &Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>> {
@@ -313,7 +319,18 @@ impl Av1Injector {
         } else if self.mismatched_length {
             Ok(last_obu.clone())
         } else {
-            bail!("No metadata found for frame {}", frame_index)
+            self.mismatched_length = true;
+
+            if let Some(previous) = last_obu {
+                println!(
+                    "\nWarning: mismatched lengths. video has more frames than metadata (first missing: {}).\nMetadata will be duplicated at the end to match video length\n",
+                    frame_index
+                );
+
+                Ok(Some(previous.clone()))
+            } else {
+                bail!("No metadata found for frame {}", frame_index)
+            }
         }
     }
 
@@ -324,31 +341,61 @@ impl Av1Injector {
         let chunk_size = 100_000;
 
         let mut reader = BufReader::with_capacity(chunk_size, File::open(&self.input)?);
-        let header = Self::read_ivf_header(&mut reader)?;
-        self.writer.write_all(&header.raw)?;
+        let mut header = Self::read_ivf_header(&mut reader)?;
 
-        self.mismatched_length = if header.frame_count as usize != self.metadata_list.len() {
+        let mut sanitized_timebase_num = header.timebase_num as u64;
+        let mut sanitized_timebase_den = header.timebase_den as u64;
+
+        if sanitized_timebase_num == 0 || sanitized_timebase_den == 0 {
             println!(
-                "\nWarning: mismatched lengths. video {}, HDR10+ JSON {}",
-                header.frame_count,
-                self.metadata_list.len()
+                "Warning: IVF header reports zero timebase fields; defaulting to 1/1 timebase for timestamps"
             );
 
-            if self.metadata_list.len() < header.frame_count as usize {
-                println!("Metadata will be duplicated at the end to match video length\n");
-            } else {
-                println!("Metadata will be skipped at the end to match video length\n");
+            if sanitized_timebase_num == 0 {
+                sanitized_timebase_num = 1;
+                header.raw[20..24].copy_from_slice(&(sanitized_timebase_num as u32).to_le_bytes());
             }
 
-            true
-        } else {
-            false
-        };
+            if sanitized_timebase_den == 0 {
+                sanitized_timebase_den = 1;
+                header.raw[16..20].copy_from_slice(&(sanitized_timebase_den as u32).to_le_bytes());
+            }
+        }
+
+        self.writer.write_all(&header.raw)?;
+
+        println!(
+            "IVF timebase: numerator = {}, denominator = {}",
+            sanitized_timebase_num, sanitized_timebase_den
+        );
+
+        self.mismatched_length =
+            if header.frame_count as usize != self.metadata_list.len() && header.frame_count != 0 {
+                println!(
+                    "\nWarning: mismatched lengths. video {}, HDR10+ JSON {}",
+                    header.frame_count,
+                    self.metadata_list.len()
+                );
+
+                if self.metadata_list.len() < header.frame_count as usize {
+                    println!("Metadata will be duplicated at the end to match video length\n");
+                } else {
+                    println!("Metadata will be skipped at the end to match video length\n");
+                }
+
+                true
+            } else {
+                false
+            };
 
         let mut last_obu: Option<Vec<u8>> = None;
         let mut frame_index: usize = 0;
         let mut processed_bytes: u64 = 32;
-
+        let mut actual_frames: u32 = 0;
+        let mut last_timestamp: Option<u64> = None;
+        let mut observed_step: Option<u64> = None;
+        let default_step = sanitized_timebase_num.max(1);
+        let mut timestamp_warning_emitted = false;
         loop {
             let mut frame_header = [0u8; 12];
             if reader.read_exact(&mut frame_header).is_err() {
@@ -356,6 +403,7 @@ impl Av1Injector {
             }
 
             let frame_size = u32::from_le_bytes(frame_header[0..4].try_into().unwrap()) as usize;
+            let source_timestamp = u64::from_le_bytes(frame_header[4..12].try_into().unwrap());
 
             let mut frame_buf = vec![0u8; frame_size];
             reader.read_exact(&mut frame_buf)?;
@@ -379,25 +427,70 @@ impl Av1Injector {
 
             self.writer
                 .write_all(&(out_frame.len() as u32).to_le_bytes())?;
-            self.writer.write_all(&frame_header[4..12])?;
+
+            let frame_timestamp = match last_timestamp {
+                Some(previous) if source_timestamp > previous => {
+                    let delta = source_timestamp - previous;
+                    observed_step = Some(observed_step.map_or(delta, |step| gcd(step, delta)));
+                    source_timestamp
+                }
+                Some(previous) => {
+                    let enforced_step = observed_step.unwrap_or(default_step);
+
+                    if !timestamp_warning_emitted {
+                        println!(
+                            "Warning: IVF timestamps are not strictly increasing; forcing monotonic values"
+                        );
+                        timestamp_warning_emitted = true;
+                    }
+
+                    previous.saturating_add(enforced_step)
+                }
+                None => source_timestamp,
+            };
+
+            last_timestamp = Some(frame_timestamp);
+
+            self.writer.write_all(&frame_timestamp.to_le_bytes())?;
             self.writer.write_all(&out_frame)?;
 
             frame_index += 1;
+            actual_frames += 1;
 
             processed_bytes += 12 + frame_size as u64;
             self.progress_bar
                 .set_position(processed_bytes / 100_000_000);
-
-            if frame_index >= header.frame_count as usize {
-                break;
-            }
         }
 
         self.writer.flush()?;
+        if header.frame_count == 0 || header.frame_count != actual_frames {
+            self.writer.get_mut().seek(SeekFrom::Start(24))?;
+            self.writer
+                .get_mut()
+                .write_all(&actual_frames.to_le_bytes())?;
+            self.writer.flush()?;
+
+            if header.frame_count != 0 && header.frame_count != actual_frames {
+                println!(
+                    "\nWarning: IVF header frame count {} replaced with {} to match actual frames\n",
+                    header.frame_count, actual_frames
+                );
+            }
+        }
         self.progress_bar.finish_and_clear();
 
         Ok(())
     }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let tmp = b;
+        b = a % tmp;
+        a = tmp;
+    }
+
+    a.max(1)
 }
 
 impl IoProcessor for Injector {
