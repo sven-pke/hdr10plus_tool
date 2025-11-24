@@ -1,5 +1,4 @@
 use anyhow::{Result, ensure};
-use bitvec_helpers::bitstream_io_writer::BitstreamIoWriter;
 
 use crate::metadata::{Hdr10PlusMetadata, Hdr10PlusMetadataEncOpts};
 use crate::metadata_json::Hdr10PlusJsonMetadata;
@@ -35,16 +34,13 @@ fn encode_av1_metadata_payload(metadata: &Hdr10PlusMetadata, validate: bool) -> 
         with_country_code: true,
     };
 
-    let mut writer = BitstreamIoWriter::with_capacity(64);
+    let mut payload = Vec::with_capacity(64);
 
-    // metadata_type = ITU-T T.35
-    writer.write::<8, u8>(OBU_METADATA_TYPE_HDR10_PLUS)?;
+    // metadata_type = ITU-T T.35 (leb128 encoded)
+    payload.extend(write_uleb128(OBU_METADATA_TYPE_HDR10_PLUS as usize));
+    payload.extend(metadata.encode_with_opts(&opts)?);
 
-    for byte in metadata.encode_with_opts(&opts)? {
-        writer.write::<8, u8>(byte)?;
-    }
-
-    Ok(writer.into_inner())
+    Ok(payload)
 }
 
 /// Returns the raw OBU bitstream for a HDR10+ metadata message.

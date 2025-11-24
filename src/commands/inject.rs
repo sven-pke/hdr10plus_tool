@@ -341,8 +341,33 @@ impl Av1Injector {
         let chunk_size = 100_000;
 
         let mut reader = BufReader::with_capacity(chunk_size, File::open(&self.input)?);
-        let header = Self::read_ivf_header(&mut reader)?;
+        let mut header = Self::read_ivf_header(&mut reader)?;
+
+        let mut sanitized_timebase_num = header.timebase_num as u64;
+        let mut sanitized_timebase_den = header.timebase_den as u64;
+
+        if sanitized_timebase_num == 0 || sanitized_timebase_den == 0 {
+            println!(
+                "Warning: IVF header reports zero timebase fields; defaulting to 1/1 timebase for timestamps"
+            );
+
+            if sanitized_timebase_num == 0 {
+                sanitized_timebase_num = 1;
+                header.raw[20..24].copy_from_slice(&(sanitized_timebase_num as u32).to_le_bytes());
+            }
+
+            if sanitized_timebase_den == 0 {
+                sanitized_timebase_den = 1;
+                header.raw[16..20].copy_from_slice(&(sanitized_timebase_den as u32).to_le_bytes());
+            }
+        }
+
         self.writer.write_all(&header.raw)?;
+
+        println!(
+            "IVF timebase: numerator = {}, denominator = {}",
+            sanitized_timebase_num, sanitized_timebase_den
+        );
 
         self.mismatched_length =
             if header.frame_count as usize != self.metadata_list.len() && header.frame_count != 0 {
@@ -367,18 +392,10 @@ impl Av1Injector {
         let mut frame_index: usize = 0;
         let mut processed_bytes: u64 = 32;
         let mut actual_frames: u32 = 0;
-        let timestamp_step: u64 = if header.timebase_num == 0 {
-            if header.timebase_den != 0 {
-                println!(
-                    "Warning: IVF timebase numerator is 0; defaulting to 1 tick per frame (denominator = {})",
-                    header.timebase_den
-                );
-            }
-
-            1
-        } else {
-            header.timebase_num as u64
-        };
+        let mut last_timestamp: Option<u64> = None;
+        let mut observed_step: Option<u64> = None;
+        let default_step = sanitized_timebase_num.max(1);
+        let mut timestamp_warning_emitted = false;
         loop {
             let mut frame_header = [0u8; 12];
             if reader.read_exact(&mut frame_header).is_err() {
@@ -386,6 +403,7 @@ impl Av1Injector {
             }
 
             let frame_size = u32::from_le_bytes(frame_header[0..4].try_into().unwrap()) as usize;
+            let source_timestamp = u64::from_le_bytes(frame_header[4..12].try_into().unwrap());
 
             let mut frame_buf = vec![0u8; frame_size];
             reader.read_exact(&mut frame_buf)?;
@@ -409,7 +427,30 @@ impl Av1Injector {
 
             self.writer
                 .write_all(&(out_frame.len() as u32).to_le_bytes())?;
-            let frame_timestamp = timestamp_step.saturating_mul(frame_index as u64);
+
+            let frame_timestamp = match last_timestamp {
+                Some(previous) if source_timestamp > previous => {
+                    let delta = source_timestamp - previous;
+                    observed_step = Some(observed_step.map_or(delta, |step| gcd(step, delta)));
+                    source_timestamp
+                }
+                Some(previous) => {
+                    let enforced_step = observed_step.unwrap_or(default_step);
+
+                    if !timestamp_warning_emitted {
+                        println!(
+                            "Warning: IVF timestamps are not strictly increasing; forcing monotonic values"
+                        );
+                        timestamp_warning_emitted = true;
+                    }
+
+                    previous.saturating_add(enforced_step)
+                }
+                None => source_timestamp,
+            };
+
+            last_timestamp = Some(frame_timestamp);
+
             self.writer.write_all(&frame_timestamp.to_le_bytes())?;
             self.writer.write_all(&out_frame)?;
 
@@ -419,7 +460,6 @@ impl Av1Injector {
             processed_bytes += 12 + frame_size as u64;
             self.progress_bar
                 .set_position(processed_bytes / 100_000_000);
-
         }
 
         self.writer.flush()?;
@@ -441,6 +481,16 @@ impl Av1Injector {
 
         Ok(())
     }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let tmp = b;
+        b = a % tmp;
+        a = tmp;
+    }
+
+    a.max(1)
 }
 
 impl IoProcessor for Injector {
