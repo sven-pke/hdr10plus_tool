@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 hdr10plus = { path = "./hdr10plus", features = ["json"] }
+av1_parser = { path = "av1_parser" }
 bitvec_helpers = { version = "4.0.1", default-features = false, features = ["bitstream-io"] }
 
 clap = { version = "4.5.53", features = ["derive", "wrap_help", "deprecated"] }
@@ -28,9 +29,8 @@ name = "hdr10plus_tool"
 path = "src/main.rs"
 
 [workspace]
-members = [
-    "hdr10plus",
-]
+members = [".", "hdr10plus", "av1_parser"]
+resolver = "2"
 
 [features]
 default = ["system-font"]
