@@ -10,7 +10,6 @@ repository = "https://github.com/quietvoid/hdr10plus_tool/tree/master/hdr10plus"
 
 [dependencies]
 bitvec_helpers = { version = "4.0.1", default-features = false, features = ["bitstream-io"] }
-hevc_parser = { version = "0.6.10", optional = true }
 
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
@@ -19,7 +18,6 @@ serde_json = { version = "1.0.148", features = ["preserve_order"], optional = tr
 libc = { version = "0.2", optional = true }
 
 [features]
-hevc = ["dep:hevc_parser"]
 json = ["dep:serde", "dep:serde_json"]
 capi = ["libc", "json"]
 

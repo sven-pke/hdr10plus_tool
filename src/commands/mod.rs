@@ -27,15 +27,15 @@ pub enum ArgPeakBrightnessSource {
 
 #[derive(Parser, Debug)]
 pub enum Command {
-    #[command(about = "Extracts the HDR10+ metadata from HEVC SEI messages to a JSON file")]
+    #[command(about = "Extracts the HDR10+ metadata from AV1 OBU_METADATA units to a JSON file")]
     Extract(ExtractArgs),
 
     #[command(
-        about = "Interleaves HDR10+ metadata NAL units before slices in an HEVC encoded bitstream"
+        about = "Interleaves HDR10+ metadata OBUs into an AV1 bitstream"
     )]
     Inject(InjectArgs),
 
-    #[command(about = "Removes HDR10+ metadata SEI messages in an HEVC encoded bitstream")]
+    #[command(about = "Removes HDR10+ metadata OBUs from an AV1 bitstream")]
     Remove(RemoveArgs),
 
     #[command(about = "Plot the HDR10+ dynamic brightness metadata")]
@@ -49,7 +49,7 @@ pub enum Command {
 pub struct ExtractArgs {
     #[arg(
         id = "input",
-        help = "Sets the input HEVC file to use, or piped with -",
+        help = "Sets the input AV1 file to use",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -60,7 +60,7 @@ pub struct ExtractArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input HEVC file to use, or piped with - (positional)",
+        help = "Sets the input AV1 file to use (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -76,16 +76,10 @@ pub struct ExtractArgs {
     pub output: Option<PathBuf>,
 
     #[arg(
-        long,
-        help = "Skip metadata reordering, workaround for misauthored HEVC files"
-    )]
-    skip_reorder: bool,
-
-    #[arg(
         id = "limit",
         long,
         short = 'l',
-        help = "Stop processing input after N frames"
+        help = "Stop processing input after N OBUs"
     )]
     pub limit: Option<u64>,
 }
@@ -94,7 +88,7 @@ pub struct ExtractArgs {
 pub struct InjectArgs {
     #[arg(
         id = "input",
-        help = "Sets the input HEVC file to use",
+        help = "Sets the input AV1 file to use",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -105,7 +99,7 @@ pub struct InjectArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input HEVC file to use (positional)",
+        help = "Sets the input AV1 file to use (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -123,7 +117,7 @@ pub struct InjectArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output HEVC file location",
+        help = "Output AV1 file location",
         value_hint = ValueHint::FilePath
     )]
     pub output: Option<PathBuf>,
@@ -133,7 +127,7 @@ pub struct InjectArgs {
 pub struct RemoveArgs {
     #[arg(
         id = "input",
-        help = "Sets the input HEVC file to use, or piped with -",
+        help = "Sets the input AV1 file to use",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -144,7 +138,7 @@ pub struct RemoveArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input HEVC file to use, or piped with - (positional)",
+        help = "Sets the input AV1 file to use (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -154,7 +148,7 @@ pub struct RemoveArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Sets the output HEVC file to use",
+        help = "Sets the output AV1 file to use",
         value_hint = ValueHint::FilePath
     )]
     pub output: Option<PathBuf>,
